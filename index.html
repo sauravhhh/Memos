@@ -197,12 +197,14 @@ async function dbTx(mode, fn){
 const dbAll = ()=> dbTx('readonly', st => st.getAll());
 const dbPut = rec => dbTx('readwrite', st => st.put(rec));
 const dbDel = id => dbTx('readwrite', st => st.delete(id));
-const dbGet = id => new Promise(async (res,rej)=>{
-  const db = await dbp();
-  const tx = db.transaction('recs','readonly');
-  const q = tx.objectStore('recs').get(id);
-  q.onsuccess = ()=> res(q.result); q.onerror = ()=> rej(q.error);
-});
+function dbGet(id){
+  return dbp().then(db=>new Promise((res,rej)=>{
+    const tx = db.transaction('recs','readonly');
+    const q = tx.objectStore('recs').get(id);
+    q.onsuccess = ()=> res(q.result);
+    q.onerror = ()=> rej(q.error);
+  }));
+}
 
 /* ================= state ================= */
 let recs = [];           // {id,name,ts,dur,blob?} blob loaded lazily
@@ -219,9 +221,11 @@ function showErr(m){ const e=$('err'); e.textContent=m; e.style.display='block';
 
 /* ================= list ================= */
 async function refresh(){
-  const all = await dbAll();
-  recs = all.map(r=>({id:r.id, name:r.name, ts:r.ts, dur:r.dur})).sort((a,b)=>b.ts-a.ts);
-  renderList();
+  try{
+    const all = await dbAll();
+    recs = all.map(r=>({id:r.id, name:r.name, ts:r.ts, dur:r.dur})).sort((a,b)=>b.ts-a.ts);
+    renderList();
+  }catch(e){ showErr('Could not load your memos.'); }
 }
 function renderList(){
   const q = $('search').value.trim().toLowerCase();
@@ -379,15 +383,17 @@ $('recDone').addEventListener('click', ()=>{
 });
 async function onRecStop(){
   const dur = recElapsed;
+  const type = (mr && mr.mimeType) || 'audio/webm';
   cleanupRec(); stopTracks();
-  const type = mr.mimeType || 'audio/webm';
-  const blob = new Blob(chunks, {type});
-  if(dur < 1 || !blob.size){ showErr('Recording too short — nothing saved.'); return; }
-  const id = uid();
-  const d = new Date();
-  const name = 'New Recording ' + d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
-  await dbPut({id, name, ts:Date.now(), dur, blob});
-  await refresh();
+  try{
+    const blob = new Blob(chunks, {type});
+    if(dur < 1 || !blob.size){ showErr('Recording too short — nothing saved.'); return; }
+    const id = uid();
+    const d = new Date();
+    const name = 'New Recording ' + d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    await dbPut({id, name, ts:Date.now(), dur, blob});
+    await refresh();
+  }catch(e){ showErr('Could not save the recording. Please try again.'); }
 }
 function cleanupRec(){
   cancelAnimationFrame(rafId); clearInterval(tickId);
@@ -409,18 +415,26 @@ async function openDetail(id){
   $('dSpeed').textContent = '1×';
   $('detail').classList.add('open');
   sizeCanvas(dCv);
-  curPeaks = await getPeaks(id, 160);
+  try{ curPeaks = await getPeaks(id, 160); }catch(e){ curPeaks = null; }
   if(curPeaks) drawBars(dCv, curPeaks, 0);
-  const full = await dbGet(id);
-  if(full && full.blob){
-    audio = new Audio(URL.createObjectURL(full.blob));
-    audio.preservesPitch = true;
-    audio.addEventListener('timeupdate', ()=>{
-      if(curPeaks && audio.duration) drawBars(dCv, curPeaks, audio.currentTime/audio.duration);
-      $('dCur').textContent = fmtMMSS(audio.currentTime||0);
-    });
-    audio.addEventListener('ended', ()=>{ $('dPlay').textContent='▶'; if(curPeaks) drawBars(dCv,curPeaks,0); });
+  else {
+    const x=dCv.getContext('2d');
+    x.fillStyle='rgba(255,255,255,.35)'; x.font='16px -apple-system,sans-serif'; x.textAlign='center';
+    x.fillText('Waveform unavailable', dCv.width/2, dCv.height/2);
   }
+  try{
+    const full = await dbGet(id);
+    if(full && full.blob){
+      audio = new Audio(URL.createObjectURL(full.blob));
+      audio.preservesPitch = true;
+      audio.addEventListener('timeupdate', ()=>{
+        if(curPeaks && audio.duration) drawBars(dCv, curPeaks, audio.currentTime/audio.duration);
+        $('dCur').textContent = fmtMMSS(audio.currentTime||0);
+      });
+      audio.addEventListener('ended', ()=>{ $('dPlay').textContent='▶'; if(curPeaks) drawBars(dCv,curPeaks,0); });
+      audio.addEventListener('error', ()=>showErr('This recording cannot be played in this browser.'));
+    } else showErr('Audio data missing for this memo.');
+  }catch(e){ showErr('Could not load the recording.'); }
 }
 function stopAudio(){ if(audio){ audio.pause(); audio=null; } cancelAnimationFrame(dRaf); }
 $('dBack').addEventListener('click', ()=>{ stopAudio(); $('detail').classList.remove('open'); curId=null; });
